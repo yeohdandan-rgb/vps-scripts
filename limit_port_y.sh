@@ -1,19 +1,32 @@
 #!/bin/bash
 
-# 1. 自动检测带有默认路由的网卡名称
+# 自动检测带有默认路由的网卡名称
 INTERFACE=$(ip -4 route ls | grep default | awk '{print $5}' | head -1)
 CONFIG_FILE="/etc/port_limit_config"
 
-# 如果由于某种原因没有检测到，则设置一个后备容错默认值
 if [ -z "$INTERFACE" ]; then
     echo "⚠️ 无法自动检测到默认网卡，将默认使用 eth0"
     INTERFACE="eth0"
 fi
 
-# ================== 以下为原脚本内容 ==================
+# ================= 彻底补全缺失的核心函数 =================
+clear_all() {
+    tc qdisc del dev "$INTERFACE" root 2>/dev/null
+    tc qdisc del dev "$INTERFACE" ingress 2>/dev/null
+    tc qdisc del dev ifb0 root 2>/dev/null
+    ip link set dev ifb0 down 2>/dev/null
+}
 
-# ... (如果原脚本有 init_env 和 clear_all，请保持原样，这里假设已经包含了它们) ...
-# 注意：原脚本的 init_env 和 clear_all 函数代码缺失，如果在你原本的文件里有，请保留它们！
+init_env() {
+    # 加载虚拟网卡模块（用于拦截并限制上传速率）
+    modprobe ifb numifbs=1 2>/dev/null
+    ip link set dev ifb0 up 2>/dev/null
+    # 建立入站流量镜像
+    tc qdisc add dev "$INTERFACE" ingress 2>/dev/null
+    tc filter add dev "$INTERFACE" parent ffff: protocol ip u32 match u32 0 0 action mirred egress redirect dev ifb0 2>/dev/null
+    tc filter add dev "$INTERFACE" parent ffff: protocol ipv6 u32 match u32 0 0 action mirred egress redirect dev ifb0 2>/dev/null
+}
+# ======================================================
 
 apply_rules() {
     if [ ! -f $CONFIG_FILE ] || [ ! -s $CONFIG_FILE ]; then
@@ -32,7 +45,7 @@ apply_rules() {
         count=$((count + 1))
         class_id="1:$count"
 
-        # 模式 1(下载)
+        # 模式 1(下载 - 限制服务器出站)
         if [ "$mode" == "1" ] || [ "$mode" == "3" ]; then
             tc qdisc replace dev "$INTERFACE" root handle 1: htb default 10
             tc class add dev "$INTERFACE" parent 1: classid "$class_id" htb rate "${speed}mbit" ceil "${speed}mbit"
@@ -40,7 +53,7 @@ apply_rules() {
             tc filter add dev "$INTERFACE" parent 1: protocol ipv6 u32 match ip6 sport "$port" 0xffff flowid "$class_id"
         fi
 
-        # 模式 2(上传)
+        # 模式 2(上传 - 限制服务器入站)
         if [ "$mode" == "2" ] || [ "$mode" == "3" ]; then
             tc qdisc replace dev ifb0 root handle 1: htb default 10
             tc class add dev ifb0 parent 1: classid "$class_id" htb rate "${speed}mbit" ceil "${speed}mbit"
