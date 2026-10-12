@@ -9,7 +9,6 @@ if [ -z "$INTERFACE" ]; then
     INTERFACE="eth0"
 fi
 
-# ================= 彻底补全缺失的核心函数 =================
 clear_all() {
     tc qdisc del dev "$INTERFACE" root 2>/dev/null
     tc qdisc del dev "$INTERFACE" ingress 2>/dev/null
@@ -18,15 +17,12 @@ clear_all() {
 }
 
 init_env() {
-    # 加载虚拟网卡模块（用于拦截并限制上传速率）
     modprobe ifb numifbs=1 2>/dev/null
     ip link set dev ifb0 up 2>/dev/null
-    # 建立入站流量镜像
     tc qdisc add dev "$INTERFACE" ingress 2>/dev/null
     tc filter add dev "$INTERFACE" parent ffff: protocol ip u32 match u32 0 0 action mirred egress redirect dev ifb0 2>/dev/null
     tc filter add dev "$INTERFACE" parent ffff: protocol ipv6 u32 match u32 0 0 action mirred egress redirect dev ifb0 2>/dev/null
 }
-# ======================================================
 
 apply_rules() {
     if [ ! -f $CONFIG_FILE ] || [ ! -s $CONFIG_FILE ]; then
@@ -45,7 +41,7 @@ apply_rules() {
         count=$((count + 1))
         class_id="1:$count"
 
-        # 模式 1(下载 - 限制服务器出站)
+        # 模式 1(下载)
         if [ "$mode" == "1" ] || [ "$mode" == "3" ]; then
             tc qdisc replace dev "$INTERFACE" root handle 1: htb default 10
             tc class add dev "$INTERFACE" parent 1: classid "$class_id" htb rate "${speed}mbit" ceil "${speed}mbit"
@@ -53,7 +49,7 @@ apply_rules() {
             tc filter add dev "$INTERFACE" parent 1: protocol ipv6 u32 match ip6 sport "$port" 0xffff flowid "$class_id"
         fi
 
-        # 模式 2(上传 - 限制服务器入站)
+        # 模式 2(上传)
         if [ "$mode" == "2" ] || [ "$mode" == "3" ]; then
             tc qdisc replace dev ifb0 root handle 1: htb default 10
             tc class add dev ifb0 parent 1: classid "$class_id" htb rate "${speed}mbit" ceil "${speed}mbit"
@@ -64,7 +60,6 @@ apply_rules() {
     echo ">>> 限速规则已在 $INTERFACE 上生效！"
 }
 
-# 显示配置列表
 show_config() {
     if [ ! -f $CONFIG_FILE ] || [ ! -s $CONFIG_FILE ]; then
         echo "暂无任何限速配置。"
@@ -79,7 +74,7 @@ show_config() {
             case $m in
                 1) mode_name="用户下载限制" ;;
                 2) mode_name="用户上传限制" ;;
-                3) mode_name="双向限制" ;;
+                3) mode_name="双向同速限制" ;;
             esac
             printf "%-10s | %-15s | %-10s\n" "$p" "$mode_name" "$s"
         done < $CONFIG_FILE
@@ -87,7 +82,6 @@ show_config() {
     fi
 }
 
-# 查看实时流量统计 (核心统计功能)
 show_stats() {
     echo "=================================="
     echo "    实时流量统计 (网卡: $INTERFACE)"
@@ -101,14 +95,13 @@ show_stats() {
     read -p "按回车键返回主菜单..."
 }
 
-# 交互菜单
 while true; do
     echo ""
     echo "=================================="
     echo "    多端口限速管理工具 (终极版)"
     echo "    当前自动识别网卡: $INTERFACE"
     echo "=================================="
-    echo "1. 添加/修改端口限速"
+    echo "1. 添加/修改端口限速 (支持上下行独立设置)"
     echo "2. 暂停所有限速 (恢复全速)"
     echo "3. 恢复所有限速 (重新加载配置)"
     echo "4. 删除特定端口配置"
@@ -121,14 +114,24 @@ while true; do
 
     case $opt in
         1)
-            echo "模式: 1.用户[下载]限制 2.用户[上传]限制 3.双向限制"
-            read -p "模式: " m; read -p "端口: " p; read -p "速率(Mbps): " s
-            sed -i "/^$p /d" $CONFIG_FILE 2>/dev/null
+            echo "模式: 1.单向下行(下载) 2.单向上行(上传) 3.双向同速限制"
+            read -p "模式(1/2/3): " m; read -p "端口: " p; read -p "速率(Mbps): " s
+            if [ "$m" == "3" ]; then
+                # 如果设置双向同速，清空该端口所有旧规则
+                sed -i "/^$p /d" $CONFIG_FILE 2>/dev/null
+            else
+                # 如果设置单向，仅清理该方向的旧规则和可能冲突的双向规则，保留另一方向
+                sed -i "/^$p $m /d" $CONFIG_FILE 2>/dev/null
+                sed -i "/^$p 3 /d" $CONFIG_FILE 2>/dev/null
+            fi
             echo "$p $m $s" >> $CONFIG_FILE
             apply_rules ;;
         2) clear_all ;;
         3) apply_rules ;;
-        4) read -p "删除端口: " p; sed -i "/^$p /d" $CONFIG_FILE; apply_rules ;;
+        4) 
+            read -p "删除端口: " p
+            sed -i "/^$p /d" $CONFIG_FILE 2>/dev/null
+            apply_rules ;;
         5) show_config ;;
         6) clear_all; rm -f $CONFIG_FILE ;;
         7) show_stats ;;
